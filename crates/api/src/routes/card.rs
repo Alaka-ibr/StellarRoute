@@ -21,6 +21,16 @@ use utoipa::ToSchema;
 
 use crate::{error::ApiError, models::ApiResponse, state::AppState};
 
+/// International fiat allowlist (CARD-09, issue #1469).
+///
+/// Included by path because `card` is not yet declared in `lib.rs`, and
+/// declaring it there is not an option while sibling card modules
+/// (`authorization`, `fx`, `horizon`, `webhook`) are still unimplemented.
+/// `crate::routes::card` is public, so everything in here stays reachable and
+/// nothing in this module is reported as dead code.
+#[path = "../card/fiat.rs"]
+pub mod fiat;
+
 /// Returns `true` only when `CARD_ENABLED=true` (case-insensitive, trimmed).
 ///
 /// Unset, empty, or any other value means disabled. This keeps the new
@@ -55,6 +65,13 @@ pub struct CardApplicationDraft {
     /// Display name for the application (not a PAN, not a key).
     #[serde(default)]
     pub display_name: Option<String>,
+    /// ISO-4217 charging currency for the card (CARD-09).
+    ///
+    /// Optional on the wire so previously valid payloads still deserialize,
+    /// but the validate handler requires it: an omitted code fails
+    /// validation. Must be one of the codes in [`fiat`].
+    #[serde(default)]
+    pub currency: Option<String>,
 }
 
 /// Validation outcome for a draft application.
@@ -148,6 +165,12 @@ pub async fn validate_card_application(
             "applicant_ref must not be empty".to_string(),
         ));
     }
+    // CARD-09: the card charges international card-network fiat, so the code
+    // is required and must be on the centralized allowlist. An omitted code
+    // fails rather than defaulting.
+    if let Err(message) = fiat::validate(draft.currency.as_deref()) {
+        return Err(ApiError::Validation(message.to_string()));
+    }
     let body = ApiResponse::new(
         CardApplicationValidation {
             valid: true,
@@ -222,6 +245,7 @@ mod tests {
         let draft = serde_json::to_value(CardApplicationDraft {
             applicant_ref: "ref-1".into(),
             display_name: Some("Ada".into()),
+            currency: Some("USD".into()),
         })
         .unwrap();
         let auth = serde_json::to_value(CardAuthorization {
@@ -250,5 +274,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── CARD-09: fiat allowlist wiring ──────────────────────────────────────
+
+    /// A payload written before CARD-09 must still deserialize, so previously
+    /// valid requests are not broken at the wire boundary. The missing code is
+    /// rejected by validation instead of by deserialization.
+    #[test]
+    fn draft_without_currency_still_deserializes() {
+        let draft: CardApplicationDraft =
+            serde_json::from_str(r#"{"applicant_ref":"ref-1"}"#).unwrap();
+        assert_eq!(draft.applicant_ref, "ref-1");
+        assert_eq!(draft.currency, None);
+        assert!(
+            fiat::validate(draft.currency.as_deref()).is_err(),
+            "omitted currency must fail validation"
+        );
+    }
+
+    #[test]
+    fn draft_accepts_every_allowlisted_currency() {
+        for code in fiat::allowed_codes() {
+            let raw = format!(r#"{{"applicant_ref":"ref-1","currency":"{code}"}}"#);
+            let draft: CardApplicationDraft = serde_json::from_str(&raw).unwrap();
+            assert_eq!(
+                fiat::validate(draft.currency.as_deref()),
+                Ok(code),
+                "{code} must validate"
+            );
+        }
+    }
+
+    #[test]
+    fn draft_rejects_non_allowlisted_currency() {
+        let draft: CardApplicationDraft =
+            serde_json::from_str(r#"{"applicant_ref":"ref-1","currency":"CHF"}"#).unwrap();
+        assert!(fiat::validate(draft.currency.as_deref()).is_err());
+    }
+
+    /// JPY is the zero-decimal entry; USD is 2. Surfaced here so the route
+    /// module's tests pin the same pair the allowlist unit tests do.
+    #[test]
+    fn route_exposes_expected_decimals() {
+        assert_eq!(fiat::decimals("JPY"), Some(0));
+        assert_eq!(fiat::decimals("USD"), Some(2));
     }
 }
