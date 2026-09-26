@@ -81,6 +81,7 @@ import {
   CardDeclineBanner,
   type CardDeclineAuthorization,
 } from "./CardDeclineBanner";
+import { CardKycPanel } from "./CardKycPanel";
 
 const DISMISS_KEY = "stellarroute:card:decline-dismissed";
 
@@ -113,7 +114,16 @@ function unwrapList(body: unknown): CardDeclineAuthorization[] {
   return [];
 }
 
-export function CardPageClient() {
+export function CardPageClient({
+  status = null,
+}: {
+  /**
+   * Card application status. Defaults to `null`, so the KYC gate stays hidden
+   * until CARD-05 supplies a real status. Nothing on this page changes for
+   * existing users while it is `null`.
+   */
+  status?: string | null;
+}) {
   const [latestDeclined, setLatestDeclined] =
     useState<CardDeclineAuthorization | null>(null);
   const [dismissedId, setDismissedId] = useState<string | null>(null);
@@ -265,6 +275,7 @@ export function CardPageClient() {
 
   return (
     <div className="space-y-4">
+      <CardKycPanel status={status} />
       {showBanner && latestDeclined ? (
         <CardDeclineBanner
           authorization={latestDeclined}
